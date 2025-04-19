@@ -9,6 +9,7 @@ interface ChessMove {
   to: string;
   san: string;
   fen: string;
+  explanation?: string; // Add explanation field
 }
 
 // Added interface for evaluation
@@ -28,6 +29,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
   const [gameImported, setGameImported] = useState(false);
   const [boardWidth, setBoardWidth] = useState(400);
   const [boardHeight, setBoardHeight] = useState(400); // Add state for board height
+  const [currentMoveExplanation, setCurrentMoveExplanation] = useState<string>("");
   // Added state for Stockfish and evaluation
   const [stockfish, setStockfish] = useState<any>(null);
   const [evaluation, setEvaluation] = useState<Evaluation>({ score: 0, mate: null, loading: false });
@@ -207,6 +209,20 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
       setCurrentPosition(index);
       const historicalGame = new Chess(history[index]);
       setFen(historicalGame.fen());
+      
+      // Update move explanation
+      if (index === 0) {
+        // Initial position has no explanation
+        setCurrentMoveExplanation("");
+      } else {
+        // Get the explanation from the move that led to this position
+        const moveIndex = index - 1; // Adjust index (initial position is at 0, first move is at index 0 in moveHistory)
+        if (moveHistory[moveIndex] && moveHistory[moveIndex].explanation) {
+          setCurrentMoveExplanation(moveHistory[moveIndex].explanation || "");
+        } else {
+          setCurrentMoveExplanation("");
+        }
+      }
     }
   }
 
@@ -234,14 +250,30 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
       // Replay each move and store the FEN after each move
       for (let i = 0; i < moves.length; i++) {
         const move = moves[i];
+        // Store the current FEN before making the move
+        const prevFen = replayGame.fen();
+        
+        // Make the move
         replayGame.move({ from: move.from, to: move.to, promotion: move.promotion });
+        const currentFen = replayGame.fen();
+        
+        // Generate an explanation for this move
+        const explanation = analyzeMoveAndGenerateExplanation(
+          prevFen,
+          currentFen,
+          { from: move.from, to: move.to, san: move.san }
+        );
+        
+        // Store move with explanation
         moveHistoryWithFen.push({
           from: move.from,
           to: move.to,
           san: move.san,
-          fen: replayGame.fen()
+          fen: currentFen,
+          explanation: explanation
         });
-        fenPositions.push(replayGame.fen());
+        
+        fenPositions.push(currentFen);
       }
       
       // Set the game states
@@ -250,6 +282,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
       // Set to the initial position (index 0)
       setCurrentPosition(0); 
       setFen(fenPositions[0]); // Show initial position
+      setCurrentMoveExplanation(""); // Clear explanation for initial position
       setGameImported(true);
     } catch (error) {
       alert('Invalid PGN format. Please check your input and try again.');
@@ -290,6 +323,314 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     // Show +0.5 for white advantage, -0.5 for black advantage
     const sign = evaluation.score > 0 ? '+' : '';
     return `${sign}${evaluation.score.toFixed(1)}`;
+  }
+
+  // Helper function to analyze a chess position and generate explanations
+  function analyzeMoveAndGenerateExplanation(
+    fromFen: string, 
+    toFen: string, 
+    move: { from: string, to: string, san: string }
+  ): string {
+    const fromGame = new Chess(fromFen);
+    const toGame = new Chess(toFen);
+    
+    // Track material difference
+    const fromMaterial = calculateMaterial(fromGame);
+    const toMaterial = calculateMaterial(toGame);
+    const materialDiff = calculateMaterialDifference(fromMaterial, toMaterial);
+    
+    // Check for captures
+    const isCapture = move.san.includes('x');
+    const capturedPiece = isCapture ? getPieceCaptured(fromGame, move) : null;
+    
+    // Check for checks and checkmates
+    const isCheck = toGame.inCheck();
+    const isCheckmate = toGame.isCheckmate();
+    
+    // Check for special moves
+    const isCastle = move.san === 'O-O' || move.san === 'O-O-O';
+    const isPromotion = move.san.includes('=');
+    
+    // Check for tactical motifs
+    const fork = checkForFork(toGame);
+    const pin = checkForPin(toGame);
+    const skewer = checkForSkewer(toGame);
+    const discoveredAttack = checkForDiscoveredAttack(fromGame, toGame, move);
+    
+    // Generate explanation based on detected patterns
+    if (isCheckmate) {
+      return "Checkmate! The game is over.";
+    }
+    
+    if (isPromotion) {
+      return `Pawn promotion! ${getColorName(fromGame)} promotes to a ${getPromotionPiece(move.san)}.`;
+    }
+    
+    if (isCastle) {
+      return move.san === 'O-O' ? 
+        `${getColorName(fromGame)} castles kingside, improving king safety and connecting the rooks.` :
+        `${getColorName(fromGame)} castles queenside, seeking king safety while preparing for an attack.`;
+    }
+    
+    if (materialDiff.winner) {
+      return `${materialDiff.winner === 'white' ? 'White' : 'Black'} wins material! ${
+        materialDiff.description} (${formatMaterialValue(Math.abs(materialDiff.value))})`;
+    }
+    
+    if (fork) {
+      return `${getColorName(fromGame, true)} creates a fork! ${fork}`;
+    }
+    
+    if (pin) {
+      return `${getColorName(fromGame, true)} creates a pin! ${pin}`;
+    }
+    
+    if (skewer) {
+      return `${getColorName(fromGame, true)} creates a skewer! ${skewer}`;
+    }
+    
+    if (discoveredAttack) {
+      return `${getColorName(fromGame, true)} launches a discovered attack! ${discoveredAttack}`;
+    }
+    
+    if (isCapture) {
+      return `${getColorName(fromGame)} captures ${capturedPiece}.`;
+    }
+    
+    if (isCheck) {
+      return `${getColorName(fromGame)} gives check to the ${getColorName(toGame, false)} king.`;
+    }
+    
+    // Default explanations based on piece type
+    const pieceType = getPieceType(move.san);
+    switch(pieceType) {
+      case 'P': return `${getColorName(fromGame)} advances a pawn to control more space.`;
+      case 'N': return `${getColorName(fromGame)} develops a knight to a new square.`;
+      case 'B': return `${getColorName(fromGame)} repositions the bishop for better diagonal control.`;
+      case 'R': return `${getColorName(fromGame)} moves the rook to an ${isOpenFile(toGame, move.to) ? 'open' : 'active'} position.`;
+      case 'Q': return `${getColorName(fromGame)} repositions the queen to apply pressure.`;
+      case 'K': return `${getColorName(fromGame)} moves the king to a ${isSaferKingSquare(fromGame, toGame, move) ? 'safer' : 'new'} position.`;
+      default: return "A move has been played.";
+    }
+  }
+
+  // Helper functions for move analysis
+  function getColorName(game: Chess, capitalize = true): string {
+    const color = game.turn() === 'w' ? 'black' : 'white'; // opposite color just moved
+    return capitalize ? color.charAt(0).toUpperCase() + color.slice(1) : color;
+  }
+  
+  function getPieceType(san: string): string {
+    // Get piece type from SAN notation
+    if (san.startsWith('O-O')) return 'K'; // Castling is a king move
+    const pieceMatch = san.match(/^([NBRQK])/);
+    return pieceMatch ? pieceMatch[1] : 'P'; // Default to pawn if not specified
+  }
+  
+  function calculateMaterial(game: Chess) {
+    const pieceValues = {
+      'p': 1,
+      'n': 3,
+      'b': 3.25, // slightly higher than knight
+      'r': 5,
+      'q': 9,
+      'k': 0 // king is invaluable
+    };
+    
+    const board = game.board();
+    let whiteMaterial = 0;
+    let blackMaterial = 0;
+    
+    board.forEach(row => {
+      row.forEach(square => {
+        if (square) {
+          const value = pieceValues[square.type.toLowerCase()];
+          if (square.color === 'w') {
+            whiteMaterial += value;
+          } else {
+            blackMaterial += value;
+          }
+        }
+      });
+    });
+    
+    return { white: whiteMaterial, black: blackMaterial };
+  }
+  
+  function calculateMaterialDifference(before: { white: number, black: number }, after: { white: number, black: number }) {
+    const whiteDiff = after.white - before.white;
+    const blackDiff = after.black - before.black;
+    const netDiff = (after.white - after.black) - (before.white - before.black);
+    
+    let winner = null;
+    let description = "";
+    
+    if (netDiff > 0) {
+      winner = 'white';
+      if (blackDiff < 0) {
+        // White captured a black piece
+        description = getPieceDescription(-blackDiff, 'black');
+      }
+    } else if (netDiff < 0) {
+      winner = 'black';
+      if (whiteDiff < 0) {
+        // Black captured a white piece
+        description = getPieceDescription(-whiteDiff, 'white');
+      }
+    }
+    
+    return { 
+      value: netDiff, 
+      winner, 
+      description
+    };
+  }
+  
+  function getPieceDescription(value: number, color: string): string {
+    // Determine what piece was likely captured based on value
+    if (value >= 9) return `${color}'s queen is captured`;
+    if (value >= 5) return `${color}'s rook is captured`;
+    if (value >= 3) return `${color}'s minor piece is captured`;
+    return `${color}'s pawn is captured`;
+  }
+  
+  function formatMaterialValue(value: number): string {
+    if (value >= 1) {
+      return `+${value.toFixed(1)}`;
+    }
+    return `${value.toFixed(1)}`;
+  }
+  
+  function getPieceCaptured(game: Chess, move: { from: string, to: string }): string {
+    const board = game.board();
+    const toFile = move.to.charCodeAt(0) - 97; // Convert 'a'-'h' to 0-7
+    const toRank = 8 - parseInt(move.to[1]); // Convert '1'-'8' to 7-0
+    
+    const piece = board[toRank][toFile];
+    if (!piece) return 'a piece';
+    
+    const pieceNames = {
+      'p': 'pawn',
+      'n': 'knight',
+      'b': 'bishop',
+      'r': 'rook',
+      'q': 'queen',
+      'k': 'king'
+    };
+    
+    return `${piece.color === 'w' ? 'white' : 'black'} ${pieceNames[piece.type]}`;
+  }
+  
+  function getPromotionPiece(san: string): string {
+    const match = san.match(/=([QRBN])/);
+    if (!match) return 'queen';
+    
+    const pieceNames = {
+      'Q': 'queen',
+      'R': 'rook',
+      'B': 'bishop',
+      'N': 'knight'
+    };
+    
+    return pieceNames[match[1]];
+  }
+  
+  function isOpenFile(game: Chess, square: string): boolean {
+    const file = square.charAt(0);
+    const board = game.board();
+    
+    let pawnsOnFile = 0;
+    for (let i = 0; i < 8; i++) {
+      const fileIndex = file.charCodeAt(0) - 97; // Convert 'a'-'h' to 0-7
+      const piece = board[i][fileIndex];
+      if (piece && piece.type === 'p') {
+        pawnsOnFile++;
+      }
+    }
+    
+    return pawnsOnFile === 0;
+  }
+  
+  function isSaferKingSquare(fromGame: Chess, toGame: Chess, move: { to: string }): boolean {
+    // Simple heuristic: If the king moved away from the center, it's likely safer
+    const centerDistanceBefore = distanceFromCenter(move.to);
+    return centerDistanceBefore > 2; // Further from center is generally safer in middle/endgame
+  }
+  
+  function distanceFromCenter(square: string): number {
+    const file = square.charCodeAt(0) - 97; // Convert 'a'-'h' to 0-7
+    const rank = parseInt(square[1]) - 1; // Convert '1'-'8' to 0-7
+    
+    const distX = Math.abs(file - 3.5);
+    const distY = Math.abs(rank - 3.5);
+    return Math.sqrt(distX * distX + distY * distY);
+  }
+  
+  function checkForFork(game: Chess): string | null {
+    // A basic check for knight forks - this is simplified
+    // A more comprehensive detection would require deeper analysis
+    const board = game.board();
+    
+    for (let rank = 0; rank < 8; rank++) {
+      for (let file = 0; file < 8; file++) {
+        const piece = board[rank][file];
+        if (piece && piece.type === 'n') {
+          // Check if this knight attacks multiple valuable pieces
+          const attacks = getKnightAttacks(file, rank);
+          let valuablePiecesAttacked = 0;
+          let attackedPieces = [];
+          
+          for (const attack of attacks) {
+            if (attack.file >= 0 && attack.file < 8 && attack.rank >= 0 && attack.rank < 8) {
+              const attackedPiece = board[attack.rank][attack.file];
+              if (attackedPiece && attackedPiece.color !== piece.color && 
+                  (attackedPiece.type === 'k' || attackedPiece.type === 'q' || attackedPiece.type === 'r')) {
+                valuablePiecesAttacked++;
+                attackedPieces.push(attackedPiece.type === 'k' ? 'king' : 
+                                   attackedPiece.type === 'q' ? 'queen' : 'rook');
+              }
+            }
+          }
+          
+          if (valuablePiecesAttacked >= 2) {
+            return `A knight is forking the ${attackedPieces.join(" and ")}.`;
+          }
+        }
+      }
+    }
+    
+    return null;
+  }
+  
+  function getKnightAttacks(file: number, rank: number) {
+    return [
+      { file: file + 1, rank: rank + 2 },
+      { file: file + 2, rank: rank + 1 },
+      { file: file + 2, rank: rank - 1 },
+      { file: file + 1, rank: rank - 2 },
+      { file: file - 1, rank: rank - 2 },
+      { file: file - 2, rank: rank - 1 },
+      { file: file - 2, rank: rank + 1 },
+      { file: file - 1, rank: rank + 2 }
+    ];
+  }
+  
+  function checkForPin(game: Chess): string | null {
+    // Simplified pin detection - would need more comprehensive analysis for production
+    // This is a placeholder for more sophisticated analysis
+    return null;
+  }
+  
+  function checkForSkewer(game: Chess): string | null {
+    // Simplified skewer detection - would need more comprehensive analysis for production
+    // This is a placeholder for more sophisticated analysis
+    return null;
+  }
+  
+  function checkForDiscoveredAttack(fromGame: Chess, toGame: Chess, move: { from: string, to: string }): string | null {
+    // Simplified discovered attack detection
+    // This is a placeholder for more sophisticated analysis
+    return null;
   }
 
   return (
@@ -395,6 +736,19 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
             </select>
           </div>
         </div>
+        
+        {/* Move Explanation Panel */}
+        {gameImported && currentPosition > 0 && (
+          <div className="mt-4 p-3 bg-gray-800 border border-gray-700 rounded-lg shadow-lg">
+            <div className="flex items-center mb-1">
+              <div className="w-4 h-4 bg-blue-500 rounded-full mr-2"></div>
+              <h3 className="text-gray-200 text-sm font-semibold">Move Explanation</h3>
+            </div>
+            <p className="text-gray-300 italic text-sm">
+              {currentMoveExplanation || "No explanation available for this move."}
+            </p>
+          </div>
+        )}
       </div>
       
       {/* PGN Import or Move History - full width on mobile, half on desktop */}
