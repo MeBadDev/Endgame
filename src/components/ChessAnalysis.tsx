@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Chessboard } from 'react-chessboard';
 import { Chess } from 'chess.js';
 
@@ -11,6 +11,13 @@ interface ChessMove {
   fen: string;
 }
 
+// Added interface for evaluation
+interface Evaluation {
+  score: number;
+  mate: number | null;
+  loading: boolean;
+}
+
 export default function ChessAnalysis({}: ChessAnalysisProps) {
   const [game, setGame] = useState(new Chess());
   const [fen, setFen] = useState(game.fen());
@@ -20,12 +27,86 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
   const [pgn, setPgn] = useState('');
   const [gameImported, setGameImported] = useState(false);
   const [boardWidth, setBoardWidth] = useState(400);
+  const [boardHeight, setBoardHeight] = useState(400); // Add state for board height
+  // Added state for Stockfish and evaluation
+  const [stockfish, setStockfish] = useState<any>(null);
+  const [evaluation, setEvaluation] = useState<Evaluation>({ score: 0, mate: null, loading: false });
+  const [engineDepth, setEngineDepth] = useState(15); // Depth for analysis
   const boardContainerRef = useRef<HTMLDivElement>(null);
   const chessboardRef = useRef(null);
   
   // Refs for scrolling to the current move
   const moveHistoryContainerRef = useRef<HTMLDivElement>(null);
   const currentMoveRef = useRef<HTMLTableRowElement>(null);
+
+  // Initialize Stockfish WebAssembly
+  useEffect(() => {
+    // Import Stockfish from the public folder
+    if (typeof window !== 'undefined' && !stockfish) {
+      // Create a web worker from the stockfish.js file
+      const worker = new Worker('/stockfish/stockfish.js');
+      setStockfish(worker);
+      
+      // Initialize Stockfish
+      worker.addEventListener('message', (e) => {
+        const message = e.data;
+        if (!message) return;
+        
+        // Parse evaluation information from Stockfish output
+        if (message.includes('info depth') && message.includes(' score ')) {
+          // Extracting score from the message
+          try {
+            if (message.includes('score cp ')) {
+              // Centipawn score
+              const scoreMatch = message.match(/score cp (-?\d+)/);
+              if (scoreMatch) {
+                const score = parseInt(scoreMatch[1]) / 100; // Convert centipawns to pawns
+                setEvaluation(prev => ({ ...prev, score, mate: null, loading: false }));
+              }
+            } else if (message.includes('score mate ')) {
+              // Mate score
+              const mateMatch = message.match(/score mate (-?\d+)/);
+              if (mateMatch) {
+                const mate = parseInt(mateMatch[1]);
+                setEvaluation(prev => ({ 
+                  ...prev, 
+                  score: mate > 0 ? 10 : -10, // Display mate as +10 or -10
+                  mate, 
+                  loading: false 
+                }));
+              }
+            }
+          } catch (e) {
+            console.error('Error parsing Stockfish evaluation:', e);
+          }
+        }
+      });
+      
+      // Configure Stockfish
+      worker.postMessage('uci');
+      worker.postMessage('setoption name MultiPV value 1');
+      worker.postMessage('isready');
+    }
+  }, []);
+
+  // Add debounce function to prevent too frequent updates
+  const debounce = (func: Function, delay: number) => {
+    let timer: NodeJS.Timeout;
+    return (...args: any[]) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => func(...args), delay);
+    };
+  };
+
+  // Function to evaluate the current position with debouncing
+  const evaluatePosition = useCallback(debounce((currentFen: string) => {
+    if (!stockfish) return;
+    
+    setEvaluation(prev => ({ ...prev, loading: true }));
+    stockfish.postMessage('stop'); // Stop any ongoing analysis
+    stockfish.postMessage('position fen ' + currentFen);
+    stockfish.postMessage(`go depth ${engineDepth}`);
+  }, 250), [stockfish, engineDepth]); // 250ms debounce and dependencies
 
   // Resize the chess board when the container size changes
   useEffect(() => {
@@ -37,7 +118,10 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
         const newWidth = isMobile 
           ? Math.min(containerWidth * 0.95, window.innerWidth * 0.9) 
           : Math.min(containerWidth * 0.95, 550); // Increased from 400 to 550 for wider screens
+        
+        // Chess boards are square, so height = width
         setBoardWidth(newWidth);
+        setBoardHeight(newWidth);
       }
     }
     
@@ -100,6 +184,13 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     }
   }, [currentPosition, gameImported]);
 
+  // Evaluate position when fen changes
+  useEffect(() => {
+    if (stockfish && fen) {
+      evaluatePosition(fen);
+    }
+  }, [fen, stockfish]);
+
   function resetBoard() {
     const newGame = new Chess();
     setGame(newGame);
@@ -108,6 +199,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     setPgn('');
     setGameImported(false);
     setMoveHistory([]);
+    setEvaluation({ score: 0, mate: null, loading: false });
   }
 
   function navigateHistory(index: number) {
@@ -169,12 +261,71 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     navigateHistory(index + 1);
   }
 
+  // Helper function for evaluation bar display
+  function getEvaluationBarStyles() {
+    // Clamp the score between -5 and 5 for display purposes
+    // Score is from white's perspective, so positive is good for white
+    let clampedScore = Math.max(Math.min(evaluation.score, 5), -5);
+    // Convert to percentage (0-100) for the CSS height
+    const whitePercentage = ((clampedScore + 5) / 10) * 100;
+    
+    return {
+      white: {
+        height: `${whitePercentage}%`
+      },
+      black: {
+        height: `${100 - whitePercentage}%`
+      }
+    };
+  }
+
+  // Helper function to format evaluation display
+  function formatEvaluation() {
+    if (evaluation.loading) return "...";
+    
+    if (evaluation.mate !== null) {
+      return `M${Math.abs(evaluation.mate)}`;
+    }
+    
+    // Show +0.5 for white advantage, -0.5 for black advantage
+    const sign = evaluation.score > 0 ? '+' : '';
+    return `${sign}${evaluation.score.toFixed(1)}`;
+  }
+
   return (
     <div className="flex flex-col md:flex-row w-full max-w-6xl mx-auto gap-6">
       {/* Chessboard - full width on mobile, half on desktop */}
       <div className="w-full md:w-1/2">
         <div className="w-full flex justify-center">
           <div ref={boardContainerRef} className="w-full max-w-[95vw] md:max-w-none flex justify-center items-center">
+            {/* Evaluation Bar with label positioned above/below */}
+            <div className="relative py-2">
+              <div 
+                className="relative w-8 bg-gray-800"
+                style={{ height: `${boardHeight}px` }}
+              >
+                <div 
+                  className="absolute bottom-0 w-full bg-white transition-all duration-300 ease-out"
+                  style={getEvaluationBarStyles().white}
+                ></div>
+                <div 
+                  className="absolute top-0 w-full bg-black transition-all duration-300 ease-out"
+                  style={getEvaluationBarStyles().black}
+                ></div>
+                <div className="absolute top-1/2 w-full border-t border-gray-400"></div>
+              </div>
+              
+              {/* Evaluation text - positioned above/below the bar */}
+              <div 
+                className={`absolute w-full text-center text-xs font-bold px-1 py-1 rounded-sm shadow-md
+                          ${evaluation.score >= 0 
+                            ? 'bottom-[-22px] text-black bg-white/90' 
+                            : 'top-[-22px] text-white bg-black/90'}`}
+              >
+                {formatEvaluation()}
+              </div>
+            </div>
+          
             <Chessboard 
               id="ChessAnalysis" 
               position={fen} 
@@ -227,6 +378,23 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
             </button>
           </div>
         )}
+
+        {/* Analysis Controls */}
+        <div className="mt-4 flex justify-center items-center">
+          <div className="flex items-center space-x-2">
+            <label htmlFor="depth-control" className="text-gray-300 text-sm">Depth:</label>
+            <select 
+              id="depth-control"
+              value={engineDepth} 
+              onChange={(e) => setEngineDepth(parseInt(e.target.value))}
+              className="bg-gray-700 text-white border border-gray-600 rounded py-1 px-2 text-sm"
+            >
+              {[5, 10, 15, 20].map(depth => (
+                <option key={depth} value={depth}>{depth}</option>
+              ))}
+            </select>
+          </div>
+        </div>
       </div>
       
       {/* PGN Import or Move History - full width on mobile, half on desktop */}
