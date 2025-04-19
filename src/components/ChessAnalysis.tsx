@@ -93,7 +93,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
 
   // Add debounce function to prevent too frequent updates
   const debounce = (func: Function, delay: number) => {
-    let timer: NodeJS.Timeout;
+    let timer: ReturnType<typeof setTimeout>;
     return (...args: any[]) => {
       clearTimeout(timer);
       timer = setTimeout(() => func(...args), delay);
@@ -191,7 +191,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     if (stockfish && fen) {
       evaluatePosition(fen);
     }
-  }, [fen, stockfish]);
+  }, [fen, stockfish, evaluatePosition]);
 
   function resetBoard() {
     const newGame = new Chess();
@@ -428,7 +428,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
   }
   
   function calculateMaterial(game: Chess) {
-    const pieceValues = {
+    const pieceValues: Record<string, number> = {
       'p': 1,
       'n': 3,
       'b': 3.25, // slightly higher than knight
@@ -509,7 +509,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     const piece = board[toRank][toFile];
     if (!piece) return 'a piece';
     
-    const pieceNames = {
+    const pieceNames: Record<string, string> = {
       'p': 'pawn',
       'n': 'knight',
       'b': 'bishop',
@@ -525,7 +525,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     const match = san.match(/=([QRBN])/);
     if (!match) return 'queen';
     
-    const pieceNames = {
+    const pieceNames: Record<string, string> = {
       'Q': 'queen',
       'R': 'rook',
       'B': 'bishop',
