@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import { Chessboard } from 'react-chessboard';
 import { Chess } from 'chess.js';
+import pgnParser from 'pgn-parser';
 
 interface ChessAnalysisProps {}
 
@@ -18,6 +19,125 @@ interface Evaluation {
   mate: number | null;
   loading: boolean;
 }
+
+// Add proper typing for the Stockfish worker
+interface StockfishWorker extends Worker {
+  currentFen: string | null;
+  hasMateScore: boolean;
+}
+
+// Memoized EvaluationBar component - only re-renders when props change
+const EvaluationBar = memo(function EvaluationBar({
+  evaluation,
+  boardHeight
+}: {
+  evaluation: Evaluation;
+  boardHeight: number;
+}) {
+  // Calculate styles based on evaluation (memoized)
+  const styles = useMemo(() => {
+    // For mate scores, use a high value to make the bar go to the extreme
+    if (evaluation.mate !== null) {
+      const mateValue = evaluation.mate > 0 ? 5 : -5; // Max out the bar for mate
+      const whitePercentage = ((mateValue + 5) / 10) * 100;
+      
+      return {
+        white: {
+          height: `${whitePercentage}%`
+        },
+        black: {
+          height: `${100 - whitePercentage}%`
+        }
+      };
+    }
+    
+    // For regular scores, clamp between -5 and 5 for display purposes
+    const clampedScore = Math.max(Math.min(evaluation.score, 5), -5);
+    // Convert to percentage (0-100) for the CSS height
+    const whitePercentage = ((clampedScore + 5) / 10) * 100;
+    
+    return {
+      white: {
+        height: `${whitePercentage}%`
+      },
+      black: {
+        height: `${100 - whitePercentage}%`
+      }
+    };
+  }, [evaluation.score, evaluation.mate]);
+  
+  // Format evaluation text (memoized)
+  const evaluationText = useMemo(() => {
+    if (evaluation.loading) return "...";
+    
+    if (evaluation.mate !== null) {
+      const sign = evaluation.mate > 0 ? '+' : '-';
+      return `${sign}M${Math.abs(evaluation.mate)}`;
+    }
+    
+    const sign = evaluation.score >= 0 ? '+' : '-';
+    return `${sign}${Math.abs(evaluation.score).toFixed(1)}`;
+  }, [evaluation.loading, evaluation.score, evaluation.mate]);
+  
+  // Determine text position class (memoized)
+  const textPositionClass = useMemo(() => {
+    const isWhiteAdvantage = evaluation.score >= 0 || (evaluation.mate !== null && evaluation.mate > 0);
+    return isWhiteAdvantage 
+      ? 'bottom-[-22px] text-black bg-white/90' 
+      : 'top-[-22px] text-white bg-black/90';
+  }, [evaluation.score, evaluation.mate]);
+  
+  return (
+    <div className="relative py-2">
+      <div 
+        className="relative w-8 bg-gray-800"
+        style={{ height: `${boardHeight}px` }}
+      >
+        <div 
+          className="absolute bottom-0 w-full bg-white transition-all duration-300 ease-out"
+          style={styles.white}
+        ></div>
+        <div 
+          className="absolute top-0 w-full bg-black transition-all duration-300 ease-out"
+          style={styles.black}
+        ></div>
+        <div className="absolute top-1/2 w-full border-t border-gray-400"></div>
+      </div>
+      
+      {/* Evaluation text - positioned above/below the bar */}
+      <div 
+        className={`absolute w-full text-center text-xs font-bold px-1 py-1 rounded-sm shadow-md ${textPositionClass}`}
+      >
+        {evaluationText}
+      </div>
+    </div>
+  );
+});
+
+// Memoized Chessboard component
+const MemoizedChessboard = memo(function MemoizedChessboard({
+  position,
+  width
+}: {
+  position: string;
+  width: number;
+}) {
+  return (
+    <Chessboard 
+      id="ChessAnalysis" 
+      position={position} 
+      boardWidth={width}
+      customBoardStyle={{
+        borderRadius: '4px',
+        boxShadow: '0 5px 15px rgba(0, 0, 0, 0.5)'
+      }}
+      customDarkSquareStyle={{ backgroundColor: '#4b7399' }}
+      customLightSquareStyle={{ backgroundColor: '#eae9d2' }}
+      areArrowsAllowed={false}
+      arePiecesDraggable={false}
+    />
+  );
+});
 
 export default function ChessAnalysis({}: ChessAnalysisProps) {
   const [game, setGame] = useState(new Chess());
@@ -46,7 +166,16 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     // Import Stockfish from the public folder
     if (typeof window !== 'undefined' && !stockfish) {
       // Create a web worker from the stockfish.js file
-      const worker = new Worker('/stockfish/stockfish.js');
+      const worker = new Worker('/stockfish/stockfish.js') as StockfishWorker;
+      
+      // Keep track of the latest FEN being analyzed
+      worker.currentFen = null;
+      // Track whether we're currently processing a mate score
+      worker.hasMateScore = false;
+      
+      // Cache for evaluations to avoid redundant calculations
+      const evalCache = new Map<string, Evaluation>();
+      
       setStockfish(worker);
       
       // Initialize Stockfish
@@ -58,24 +187,80 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
         if (message.includes('info depth') && message.includes(' score ')) {
           // Extracting score from the message
           try {
+            // Get the FEN that was being analyzed when this evaluation was produced
+            const currentFen = worker.currentFen || fen;
+            
+            // Check if we already have this evaluation cached
+            if (evalCache.has(currentFen)) {
+              const cachedEval = evalCache.get(currentFen)!;
+              
+              // Only update if the cached evaluation is not a mate (regular evals can be improved)
+              if (cachedEval.mate === null) {
+                setEvaluation(cachedEval);
+              }
+              return;
+            }
+            
             if (message.includes('score cp ')) {
-              // Centipawn score
-              const scoreMatch = message.match(/score cp (-?\d+)/);
-              if (scoreMatch) {
-                const score = parseInt(scoreMatch[1]) / 100; // Convert centipawns to pawns
-                setEvaluation(prev => ({ ...prev, score, mate: null, loading: false }));
+              // Normal score (not a mate) - only update if we weren't previously showing a mate score
+              // This prevents flickering between mate and regular scores during analysis
+              if (!worker.hasMateScore) {
+                const scoreMatch = message.match(/score cp (-?\d+)/);
+                if (scoreMatch) {
+                  const score = parseInt(scoreMatch[1]) / 100; // Convert centipawns to pawns
+                  
+                  // Get current FEN to determine whose turn it is
+                  const currentGame = new Chess(currentFen);
+                  const isBlackToMove = currentGame.turn() === 'b';
+                  
+                  // If it's black's turn, we need to negate the score to keep it from white's perspective
+                  const scoreFromWhitePerspective = isBlackToMove ? -score : score;
+                  
+                  const newEval = { 
+                    score: scoreFromWhitePerspective, 
+                    mate: null, 
+                    loading: false 
+                  };
+                  
+                  // Cache the evaluation
+                  evalCache.set(currentFen, newEval);
+                  
+                  // Only update state if this is still the current position being analyzed
+                  if (currentFen === worker.currentFen) {
+                    setEvaluation(newEval);
+                  }
+                }
               }
             } else if (message.includes('score mate ')) {
-              // Mate score
+              // Mate score - these have priority over regular scores
               const mateMatch = message.match(/score mate (-?\d+)/);
               if (mateMatch) {
                 const mate = parseInt(mateMatch[1]);
-                setEvaluation(prev => ({ 
-                  ...prev, 
-                  score: mate > 0 ? 10 : -10, // Display mate as +10 or -10
-                  mate, 
+                
+                // Get current FEN to determine whose turn it is
+                const currentGame = new Chess(currentFen);
+                const isBlackToMove = currentGame.turn() === 'b';
+                
+                // If it's black's turn, we need to negate the mate value
+                // to keep it from white's perspective
+                const mateFromWhitePerspective = isBlackToMove ? -mate : mate;
+                
+                // Mark that we're processing a mate score
+                worker.hasMateScore = true;
+                
+                const newEval = { 
+                  score: mateFromWhitePerspective > 0 ? 10 : -10, 
+                  mate: mateFromWhitePerspective, 
                   loading: false 
-                }));
+                };
+                
+                // Cache the evaluation
+                evalCache.set(currentFen, newEval);
+                
+                // Only update state if this is still the current position being analyzed
+                if (currentFen === worker.currentFen) {
+                  setEvaluation(newEval);
+                }
               }
             }
           } catch (e) {
@@ -89,7 +274,13 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
       worker.postMessage('setoption name MultiPV value 1');
       worker.postMessage('isready');
     }
-  }, []);
+    
+    return () => {
+      if (stockfish) {
+        stockfish.postMessage('quit');
+      }
+    };
+  }, []); // Remove fen from the dependency array
 
   // Add debounce function to prevent too frequent updates
   const debounce = (func: Function, delay: number) => {
@@ -108,6 +299,10 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     stockfish.postMessage('stop'); // Stop any ongoing analysis
     stockfish.postMessage('position fen ' + currentFen);
     stockfish.postMessage(`go depth ${engineDepth}`);
+    
+    // Store the current FEN with the stockfish worker instance
+    // This ensures we're always using the right FEN when processing evaluations
+    stockfish.currentFen = currentFen;
   }, 250), [stockfish, engineDepth]); // 250ms debounce and dependencies
 
   // Resize the chess board when the container size changes
@@ -189,6 +384,8 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
   // Evaluate position when fen changes
   useEffect(() => {
     if (stockfish && fen) {
+      // Reset the mate score tracker when navigating to a new position
+      stockfish.hasMateScore = false;
       evaluatePosition(fen);
     }
   }, [fen, stockfish, evaluatePosition]);
@@ -236,44 +433,83 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
   
   function handlePgnImport() {
     try {
-      const newGame = new Chess();
-      newGame.loadPgn(pgn);
+      // Use pgn-parser to parse the PGN
+      const parsedPgn = pgnParser.parse(pgn);
       
-      // Extract move history from the game
-      const moves = newGame.history({ verbose: true });
+      if (!parsedPgn || !parsedPgn.length) {
+        throw new Error('Invalid PGN format');
+      }
+      
+      const pgnGame = parsedPgn[0]; // Get the first game from the parsed PGN
+      
+      // Initialize a new game
+      const newGame = new Chess();
+      
+      // Extract move history from the parsed PGN
       const fenPositions = [new Chess().fen()]; // Initial position FEN
       const moveHistoryWithFen: ChessMove[] = [];
       
       // Start from a fresh game at the initial position
       const replayGame = new Chess();
       
-      // Replay each move and store the FEN after each move
-      for (let i = 0; i < moves.length; i++) {
-        const move = moves[i];
-        // Store the current FEN before making the move
-        const prevFen = replayGame.fen();
-        
-        // Make the move
-        replayGame.move({ from: move.from, to: move.to, promotion: move.promotion });
-        const currentFen = replayGame.fen();
-        
-        // Generate an explanation for this move
-        const explanation = analyzeMoveAndGenerateExplanation(
-          prevFen,
-          currentFen,
-          { from: move.from, to: move.to, san: move.san }
-        );
-        
-        // Store move with explanation
-        moveHistoryWithFen.push({
-          from: move.from,
-          to: move.to,
-          san: move.san,
-          fen: currentFen,
-          explanation: explanation
+      // Apply headers if available
+      if (pgnGame.headers) {
+        pgnGame.headers.forEach(header => {
+          newGame.header(header.name, header.value);
         });
-        
-        fenPositions.push(currentFen);
+      }
+      
+      // Replay each move from the parsed PGN
+      if (pgnGame.moves) {
+        for (const pgnMove of pgnGame.moves) {
+          // Skip RAVs (variations) for now
+          if (!pgnMove.move) continue;
+          
+          try {
+            // Store the current FEN before making the move
+            const prevFen = replayGame.fen();
+            
+            // Make the move - convert PGN move to a move object that chess.js can understand
+            const moveObj = replayGame.move(pgnMove.move);
+            
+            if (!moveObj) {
+              console.error('Invalid move:', pgnMove.move);
+              continue;
+            }
+            
+            const currentFen = replayGame.fen();
+            
+            // Generate an explanation for this move
+            const explanation = analyzeMoveAndGenerateExplanation(
+              prevFen,
+              currentFen,
+              { 
+                from: moveObj.from, 
+                to: moveObj.to, 
+                san: moveObj.san 
+              }
+            );
+            
+            // Store move with explanation
+            moveHistoryWithFen.push({
+              from: moveObj.from,
+              to: moveObj.to,
+              san: moveObj.san,
+              fen: currentFen,
+              explanation: explanation
+            });
+            
+            // Add comments if they exist in the PGN
+            if (pgnMove.comments && pgnMove.comments.length) {
+              // Update the explanation with the actual comment from the PGN
+              moveHistoryWithFen[moveHistoryWithFen.length - 1].explanation = pgnMove.comments[0].text;
+            }
+            
+            fenPositions.push(currentFen);
+          } catch (moveError) {
+            console.error('Error applying move:', pgnMove.move, moveError);
+          }
+        }
       }
       
       // Set the game states
@@ -285,6 +521,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
       setCurrentMoveExplanation(""); // Clear explanation for initial position
       setGameImported(true);
     } catch (error) {
+      console.error('PGN parsing error:', error);
       alert('Invalid PGN format. Please check your input and try again.');
     }
   }
@@ -296,7 +533,22 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
 
   // Helper function for evaluation bar display
   function getEvaluationBarStyles() {
-    // Clamp the score between -5 and 5 for display purposes
+    // For mate scores, use a high value to make the bar go to the extreme
+    if (evaluation.mate !== null) {
+      const mateValue = evaluation.mate > 0 ? 5 : -5; // Max out the bar for mate
+      const whitePercentage = ((mateValue + 5) / 10) * 100;
+      
+      return {
+        white: {
+          height: `${whitePercentage}%`
+        },
+        black: {
+          height: `${100 - whitePercentage}%`
+        }
+      };
+    }
+    
+    // For regular scores, clamp between -5 and 5 for display purposes
     // Score is from white's perspective, so positive is good for white
     let clampedScore = Math.max(Math.min(evaluation.score, 5), -5);
     // Convert to percentage (0-100) for the CSS height
@@ -317,12 +569,15 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     if (evaluation.loading) return "...";
     
     if (evaluation.mate !== null) {
-      return `M${Math.abs(evaluation.mate)}`;
+      // Add plus sign for white's advantage, minus for black's advantage
+      const sign = evaluation.mate > 0 ? '+' : '-';
+      return `${sign}M${Math.abs(evaluation.mate)}`;
     }
     
     // Show +0.5 for white advantage, -0.5 for black advantage
-    const sign = evaluation.score > 0 ? '+' : '';
-    return `${sign}${evaluation.score.toFixed(1)}`;
+    // Always include the sign for clarity
+    const sign = evaluation.score >= 0 ? '+' : '-';
+    return `${sign}${Math.abs(evaluation.score).toFixed(1)}`;
   }
 
   // Helper function to analyze a chess position and generate explanations
@@ -640,46 +895,11 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
         <div className="w-full flex justify-center">
           <div ref={boardContainerRef} className="w-full max-w-[95vw] md:max-w-none flex justify-center items-center">
             {/* Evaluation Bar with label positioned above/below */}
-            <div className="relative py-2">
-              <div 
-                className="relative w-8 bg-gray-800"
-                style={{ height: `${boardHeight}px` }}
-              >
-                <div 
-                  className="absolute bottom-0 w-full bg-white transition-all duration-300 ease-out"
-                  style={getEvaluationBarStyles().white}
-                ></div>
-                <div 
-                  className="absolute top-0 w-full bg-black transition-all duration-300 ease-out"
-                  style={getEvaluationBarStyles().black}
-                ></div>
-                <div className="absolute top-1/2 w-full border-t border-gray-400"></div>
-              </div>
-              
-              {/* Evaluation text - positioned above/below the bar */}
-              <div 
-                className={`absolute w-full text-center text-xs font-bold px-1 py-1 rounded-sm shadow-md
-                          ${evaluation.score >= 0 
-                            ? 'bottom-[-22px] text-black bg-white/90' 
-                            : 'top-[-22px] text-white bg-black/90'}`}
-              >
-                {formatEvaluation()}
-              </div>
-            </div>
+            <EvaluationBar evaluation={evaluation} boardHeight={boardHeight} />
           
-            <Chessboard 
-              id="ChessAnalysis" 
+            <MemoizedChessboard 
               position={fen} 
-              boardWidth={boardWidth}
-              ref={chessboardRef}
-              customBoardStyle={{
-                borderRadius: '4px',
-                boxShadow: '0 5px 15px rgba(0, 0, 0, 0.5)'
-              }}
-              customDarkSquareStyle={{ backgroundColor: '#4b7399' }}
-              customLightSquareStyle={{ backgroundColor: '#eae9d2' }}
-              areArrowsAllowed={false}
-              arePiecesDraggable={false}
+              width={boardWidth}
             />
           </div>
         </div>
