@@ -33,7 +33,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
   // Added state for Stockfish and evaluation
   const [stockfish, setStockfish] = useState<any>(null);
   const [evaluation, setEvaluation] = useState<Evaluation>({ score: 0, mate: null, loading: false });
-  const [engineDepth, setEngineDepth] = useState(15); // Depth for analysis
+  const [engineDepth, setEngineDepth] = useState(5); // Depth for analysis
   const boardContainerRef = useRef<HTMLDivElement>(null);
   const chessboardRef = useRef(null);
   
