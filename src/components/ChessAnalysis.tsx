@@ -1,9 +1,41 @@
-import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, memo, forwardRef } from 'react';
 import { Chessboard } from 'react-chessboard';
 import { Chess } from 'chess.js';
 import pgnParser from 'pgn-parser';
 
 interface ChessAnalysisProps {}
+
+// Add sticker interface
+interface ChessMoveSticker {
+  square: string; // e.g., "e4"
+  type: 'best'| 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder' | 'brilliant' | 'great' | 'miss' | 'forced';
+  color?: string;
+  icon?: string;
+}
+
+// Context-aware move classification interfaces
+interface MaterialCount {
+  white: { pawns: number; knights: number; bishops: number; rooks: number; queens: number; king: number };
+  black: { pawns: number; knights: number; bishops: number; rooks: number; queens: number; king: number };
+}
+
+interface GameStateContext {
+  evaluation: number; // In centipawns from white's perspective
+  state: 'winning' | 'better' | 'equal' | 'worse' | 'losing';
+  materialBalance: number; // Material difference in points
+}
+
+interface MoveAnalysis {
+  centipawnLoss: number;
+  materialChange: number;
+  gameStateBefore: GameStateContext;
+  gameStateAfter: GameStateContext;
+  isBestMove: boolean;
+  isForced: boolean;
+  isSacrifice: boolean;
+  classification: ChessMoveSticker['type'];
+  confidence: number; // 0-1 scale
+}
 
 interface ChessMove {
   from: string;
@@ -11,6 +43,7 @@ interface ChessMove {
   san: string;
   fen: string;
   explanation?: string; // Add explanation field
+  sticker?: ChessMoveSticker; // Add sticker field
 }
 
 // Added interface for evaluation
@@ -123,22 +156,163 @@ const EvaluationBar = memo(function EvaluationBar({
   );
 });
 
+// Custom Square Renderer for stickers
+const CustomSquareRenderer = forwardRef<HTMLDivElement, any>((props, ref) => {
+  const {
+    children,
+    square,
+    squareColor,
+    style,
+    sticker
+  } = props;
+  // Get sticker styling based on type
+  const getStickerStyle = () => {
+    if (!sticker) return {};
+      const baseStyle = {
+      position: "absolute" as const,
+      right: 2,
+      top: 2,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      height: 28,
+      width: 28,
+      borderRadius: 14,
+      color: "#fff",
+      fontSize: 12,
+      fontWeight: "bold",
+      zIndex: 10,
+      pointerEvents: "none" as const,
+      textShadow: "0 1px 2px rgba(0,0,0,0.5)"
+    };
+    
+    switch (sticker.type) {
+      case 'best':
+        return { ...baseStyle, backgroundColor: '#10b981' }; // Green background
+      case 'excellent':
+        return { ...baseStyle, backgroundColor: '#10b981' }; // Green background  
+      case 'good':
+        return { ...baseStyle, backgroundColor: '#059669' }; // Slightly darker green
+      case 'inaccuracy':
+        return { ...baseStyle, backgroundColor: '#f59e0b' }; // Yellow background
+      case 'mistake':
+        return { ...baseStyle, backgroundColor: '#f97316' }; // Orange background
+      case 'blunder':
+        return { ...baseStyle, backgroundColor: '#ef4444' }; // Red background
+      case 'brilliant':
+        return { ...baseStyle, backgroundColor: '#06b6d4' }; // Cyan background
+      case 'great':
+        return { ...baseStyle, backgroundColor: '#3b82f6' }; // Blue background
+      case 'miss':
+        return { ...baseStyle, backgroundColor: '#dc2626' }; // Red background
+      case 'forced':
+        return { ...baseStyle, backgroundColor: '#15803d' }; // Saturated green background
+      default:
+        return { ...baseStyle, backgroundColor: '#6b7280' };
+    }
+  };
+  // Get sticker content
+  const getStickerContent = () => {
+    if (!sticker) return null;
+    if (sticker.icon) return sticker.icon;
+    
+    switch (sticker.type) {      case 'best':
+        return (
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+          </svg>
+        );
+      case 'excellent':
+        return (
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M7.5 11L10 13.5l6.5-6.5L18 8.5l-8 8L5.5 12l2-1z"/>
+          </svg>
+        );
+      case 'good':
+        return (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+          </svg>
+        );
+      case 'inaccuracy':
+        return '?!';
+      case 'mistake':
+        return '?';
+      case 'blunder':
+        return '??';
+      case 'brilliant':
+        return (
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+          </svg>
+        );
+      case 'great':
+        return '!';
+      case 'miss':
+        return (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+          </svg>
+        );
+      case 'forced':
+        return (
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/>
+          </svg>
+        );
+      default: return '•';
+    }
+  };
+
+  return (
+    <div ref={ref} style={{
+      ...style,
+      position: "relative"
+    }}>
+      {children}
+      {sticker && (
+        <div style={getStickerStyle()}>
+          {getStickerContent()}
+        </div>
+      )}
+    </div>
+  );
+});
+
 // Memoized Chessboard component
 const MemoizedChessboard = memo(function MemoizedChessboard({
   position,
   width,
-  orientation
+  orientation,
+  stickers = []
 }: {
   position: string;
   width: number;
   orientation?: 'white' | 'black';
+  stickers?: Array<{ square: string; sticker: ChessMoveSticker }>;
 }) {
+  // Create a map of stickers by square for easy lookup
+  const stickerMap = useMemo(() => {
+    const map: Record<string, ChessMoveSticker> = {};
+    stickers.forEach(({ square, sticker }) => {
+      map[square] = sticker;
+    });
+    return map;
+  }, [stickers]);
+
+  // Custom square component that includes stickers
+  const CustomSquareWithSticker = useCallback((props: any) => {
+    const sticker = stickerMap[props.square];
+    return <CustomSquareRenderer {...props} sticker={sticker} />;
+  }, [stickerMap]);
+
   return (
     <Chessboard 
       id="ChessAnalysis" 
       position={position} 
       boardWidth={width}
       boardOrientation={orientation || 'white'}
+      customSquare={CustomSquareWithSticker}
       customBoardStyle={{
         borderRadius: '4px',
         boxShadow: '0 5px 15px rgba(0, 0, 0, 0.5)'
@@ -147,9 +321,12 @@ const MemoizedChessboard = memo(function MemoizedChessboard({
       customLightSquareStyle={{ backgroundColor: '#eae9d2' }}
       areArrowsAllowed={false}
       arePiecesDraggable={false}
+      showBoardNotation={false}
     />
   );
 });
+
+
 
 export default function ChessAnalysis({}: ChessAnalysisProps) {
   const [game, setGame] = useState(new Chess());
@@ -167,6 +344,8 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
   const [evaluation, setEvaluation] = useState<Evaluation>({ score: 0, mate: null, loading: false });
   const [engineDepth, setEngineDepth] = useState(15); // Depth for analysis
   const [boardFlipped, setBoardFlipped] = useState(false);
+  // State for move stickers
+  const [moveStickers, setMoveStickers] = useState<Array<{ square: string; sticker: ChessMoveSticker }>>([]);
   const boardContainerRef = useRef<HTMLDivElement>(null);
   const chessboardRef = useRef(null);
   
@@ -553,6 +732,444 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
     // Add 1 because index 0 in history is the initial position
     navigateHistory(index + 1);
   }
+  // Function to add a sticker to a move
+  function addMoveSticker(square: string, stickerType: ChessMoveSticker['type']) {
+    const newSticker: ChessMoveSticker = {
+      square,
+      type: stickerType
+    };
+    
+    setMoveStickers(prev => {
+      // Remove existing sticker on this square if any
+      const filtered = prev.filter(s => s.square !== square);
+      return [...filtered, { square, sticker: newSticker }];
+    });
+    
+    // Also add to the move history if we're viewing a specific move
+    if (gameImported && currentPosition > 0) {
+      const moveIndex = currentPosition - 1;
+      setMoveHistory(prev => {
+        const updated = [...prev];
+        if (updated[moveIndex]) {
+          updated[moveIndex] = { ...updated[moveIndex], sticker: newSticker };
+        }
+        return updated;
+      });
+    }
+  }
+
+  // Function to remove sticker from a square
+  function removeMoveSticker(square: string) {
+    setMoveStickers(prev => prev.filter(s => s.square !== square));
+    
+    // Also remove from move history
+    if (gameImported && currentPosition > 0) {
+      const moveIndex = currentPosition - 1;
+      setMoveHistory(prev => {
+        const updated = [...prev];
+        if (updated[moveIndex]) {
+          updated[moveIndex] = { ...updated[moveIndex] };
+          delete updated[moveIndex].sticker;
+        }
+        return updated;
+      });
+    }
+  }
+
+  // Helper functions for sticker display
+  function getStickerColor(type: ChessMoveSticker['type']): string {
+    switch (type) {
+      case 'best': return '#10b981';
+      case 'excellent': return '#10b981';
+      case 'good': return '#059669';
+      case 'inaccuracy': return '#f59e0b';
+      case 'mistake': return '#f97316';
+      case 'blunder': return '#ef4444';
+      case 'brilliant': return '#06b6d4';
+      case 'great': return '#3b82f6';
+      case 'miss': return '#dc2626';
+      case 'forced': return '#15803d';
+      default: return '#6b7280';
+    }
+  }
+
+  function getStickerSymbol(type: ChessMoveSticker['type']): string {
+    switch (type) {
+      case 'best': return '⭐';
+      case 'excellent': return '👍';
+      case 'good': return '✓';
+      case 'inaccuracy': return '?!';
+      case 'mistake': return '?';
+      case 'blunder': return '??';
+      case 'brilliant': return '⭐';
+      case 'great': return '!';
+      case 'miss': return '✗';
+      case 'forced': return '→';
+      default: return '•';
+    }
+  }
+
+  // Function to manually assign sticker to current move
+  function assignStickerToCurrentMove(stickerType: ChessMoveSticker['type']) {
+    if (!gameImported || currentPosition <= 0) return;
+    
+    const moveIndex = currentPosition - 1;
+    const move = moveHistory[moveIndex];
+    if (!move) return;
+    
+    const newSticker: ChessMoveSticker = {
+      square: move.to,
+      type: stickerType
+    };
+    
+    setMoveHistory(prev => {
+      const updated = [...prev];
+      updated[moveIndex] = { ...updated[moveIndex], sticker: newSticker };
+      return updated;
+    });
+  }
+  // Advanced analysis system with real Stockfish integration
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState(0);
+
+  // Function to analyze a position with Stockfish and return evaluation
+  function analyzePositionWithStockfish(fen: string): Promise<number> {
+    return new Promise((resolve, reject) => {
+      if (!stockfish) {
+        reject(new Error('Stockfish not available'));
+        return;
+      }
+
+      let resolved = false;
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          reject(new Error('Analysis timeout'));
+        }
+      }, 5000); // 5 second timeout
+
+      const messageHandler = (e: MessageEvent) => {
+        const message = e.data;
+        if (!message || resolved) return;
+
+        if (message.includes('info depth') && message.includes(' score ')) {
+          const fenParts = fen.split(' ');
+          const turn = fenParts[1];
+          
+          let evaluation = 0;
+          
+          if (message.includes('score cp ')) {
+            const scoreMatch = message.match(/score cp (-?\d+)/);
+            if (scoreMatch) {
+              evaluation = parseInt(scoreMatch[1]) / 100;
+              if (turn === 'b') evaluation = -evaluation;
+            }
+          } else if (message.includes('score mate ')) {
+            const mateMatch = message.match(/score mate (-?\d+)/);
+            if (mateMatch) {
+              evaluation = parseInt(mateMatch[1]) > 0 ? 10 : -10;
+              if (turn === 'b') evaluation = -evaluation;
+            }
+          }
+
+          // Wait for a reasonable depth before accepting the result
+          const depthMatch = message.match(/depth (\d+)/);
+          if (depthMatch && parseInt(depthMatch[1]) >= 8) {
+            resolved = true;
+            clearTimeout(timeout);
+            stockfish.removeEventListener('message', messageHandler);
+            resolve(evaluation);
+          }
+        }
+      };
+
+      stockfish.addEventListener('message', messageHandler);
+      stockfish.postMessage('stop');
+      stockfish.postMessage('position fen ' + fen);
+      stockfish.postMessage('go depth 10');
+    });
+  }
+
+  // Enhanced auto-assignment with real Stockfish analysis
+  async function autoAssignStickersWithAnalysis() {
+    if (!gameImported || !stockfish || isAnalyzing) return;
+
+    setIsAnalyzing(true);
+    setAnalysisProgress(0);
+
+    try {
+      const analyzedMoves = [];
+      
+      for (let i = 0; i < moveHistory.length; i++) {
+        const move = moveHistory[i];
+        const beforeFen = i === 0 ? new Chess().fen() : history[i];
+        const afterFen = move.fen;
+        
+        // Update progress
+        setAnalysisProgress((i / moveHistory.length) * 100);
+        
+        try {
+          // Analyze both positions
+          const [evalBefore, evalAfter] = await Promise.all([
+            analyzePositionWithStockfish(beforeFen),
+            analyzePositionWithStockfish(afterFen)
+          ]);
+          
+          const beforeGame = new Chess(beforeFen);
+          const afterGame = new Chess(afterFen);
+          
+          const materialBefore = countMaterial(beforeGame);
+          const materialAfter = countMaterial(afterGame);
+          const materialChange = getMaterialChange(materialBefore, materialAfter);
+          
+          // Calculate centipawn loss (from the perspective of the player who moved)
+          const playerColor = beforeGame.turn();
+          let centipawnLoss;
+          if (playerColor === 'w') {
+            centipawnLoss = Math.max(0, evalBefore - evalAfter);
+          } else {
+            centipawnLoss = Math.max(0, -evalBefore - (-evalAfter));
+          }
+          
+          const gameStateBefore = createGameStateContext(evalBefore, materialBefore);
+          const gameStateAfter = createGameStateContext(evalAfter, materialAfter);
+          
+          // Detect special move types
+          const isBestMove = centipawnLoss < 0.15;
+          const isForced = beforeGame.inCheck() || afterGame.isCheckmate() || beforeGame.moves().length <= 2;
+          const isSacrifice = materialChange < -1 && centipawnLoss < 1;
+          
+          const classification = classifyMoveBasedOnAnalysis(
+            centipawnLoss,
+            materialChange,
+            gameStateBefore,
+            gameStateAfter,
+            isBestMove,
+            isForced,
+            isSacrifice
+          );
+          
+          analyzedMoves.push({
+            ...move,
+            sticker: { square: move.to, type: classification.type }
+          });
+          
+        } catch (error) {
+          console.warn(`Failed to analyze move ${i + 1}:`, error);
+          // Keep move without sticker if analysis fails
+          analyzedMoves.push(move);
+        }
+        
+        // Small delay to prevent overwhelming Stockfish
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      
+      setMoveHistory(analyzedMoves);
+      setAnalysisProgress(100);
+      
+    } catch (error) {
+      console.error('Analysis failed:', error);
+    } finally {
+      setIsAnalyzing(false);
+      setTimeout(() => setAnalysisProgress(0), 2000);
+    }
+  }
+  function countMaterial(game: Chess): MaterialCount {
+    const pieces = { pawns: 0, knights: 0, bishops: 0, rooks: 0, queens: 0, king: 0 };
+    const material: MaterialCount = {
+      white: { ...pieces },
+      black: { ...pieces }
+    };
+    
+    const board = game.board();
+    board.forEach(row => {
+      row.forEach(square => {
+        if (square) {
+          const color = square.color === 'w' ? 'white' : 'black';
+          switch (square.type) {
+            case 'p': material[color].pawns++; break;
+            case 'n': material[color].knights++; break;
+            case 'b': material[color].bishops++; break;
+            case 'r': material[color].rooks++; break;
+            case 'q': material[color].queens++; break;
+            case 'k': material[color].king++; break;
+          }
+        }
+      });
+    });
+    
+    return material;
+  }
+
+  function calculateMaterialValue(material: MaterialCount['white']): number {
+    return material.pawns * 1 + 
+           material.knights * 3 + 
+           material.bishops * 3.25 + 
+           material.rooks * 5 + 
+           material.queens * 9;
+  }
+
+  function getMaterialChange(before: MaterialCount, after: MaterialCount): number {
+    const beforeWhite = calculateMaterialValue(before.white);
+    const beforeBlack = calculateMaterialValue(before.black);
+    const afterWhite = calculateMaterialValue(after.white);
+    const afterBlack = calculateMaterialValue(after.black);
+    
+    return (afterWhite - afterBlack) - (beforeWhite - beforeBlack);
+  }
+
+  // Game state analysis
+  function analyzeGameState(evaluation: number): GameStateContext['state'] {
+    if (evaluation >= 3) return 'winning';
+    if (evaluation >= 1) return 'better';
+    if (evaluation >= -1) return 'equal';
+    if (evaluation >= -3) return 'worse';
+    return 'losing';
+  }
+
+  function createGameStateContext(evaluation: number, material: MaterialCount): GameStateContext {
+    const whiteValue = calculateMaterialValue(material.white);
+    const blackValue = calculateMaterialValue(material.black);
+    
+    return {
+      evaluation,
+      state: analyzeGameState(evaluation),
+      materialBalance: whiteValue - blackValue
+    };
+  }
+
+  // Core classification algorithm
+  function classifyMoveBasedOnAnalysis(
+    centipawnLoss: number,
+    materialChange: number,
+    gameStateBefore: GameStateContext,
+    gameStateAfter: GameStateContext,
+    isBestMove: boolean,
+    isForced: boolean,
+    isSacrifice: boolean
+  ): { type: ChessMoveSticker['type']; confidence: number } {
+    
+    // Brilliant moves: Sacrifices that improve position significantly
+    if (isSacrifice && centipawnLoss < 0.5 && materialChange < -1) {
+      return { type: 'brilliant', confidence: 0.9 };
+    }
+    
+    // Best moves: Objectively the strongest choice
+    if (isBestMove || centipawnLoss < 0.1) {
+      return { type: 'best', confidence: 0.95 };
+    }
+    
+    // Forced moves: Only reasonable option
+    if (isForced) {
+      return { type: 'forced', confidence: 0.9 };
+    }
+    
+    // Great moves: Very strong but not best
+    if (centipawnLoss < 0.25) {
+      return { type: 'great', confidence: 0.8 };
+    }
+    
+    // Excellent moves: Strong moves with minimal loss
+    if (centipawnLoss < 0.5) {
+      return { type: 'excellent', confidence: 0.7 };
+    }
+    
+    // Good moves: Reasonable with acceptable loss
+    if (centipawnLoss < 1.0) {
+      return { type: 'good', confidence: 0.6 };
+    }
+    
+    // Context-aware classification for larger losses
+    const isWinning = gameStateBefore.state === 'winning';
+    const isLosing = gameStateBefore.state === 'losing';
+    
+    // Missed opportunities in winning positions
+    if (isWinning && centipawnLoss > 2.0) {
+      return { type: 'miss', confidence: 0.8 };
+    }
+    
+    // Inaccuracies: Minor errors
+    if (centipawnLoss < 2.0) {
+      return { type: 'inaccuracy', confidence: 0.7 };
+    }
+    
+    // Mistakes: Significant errors
+    if (centipawnLoss < 4.0) {
+      return { type: 'mistake', confidence: 0.8 };
+    }
+    
+    // Blunders: Major errors that significantly worsen position
+    return { type: 'blunder', confidence: 0.9 };
+  }
+
+  // Function to automatically assign stickers based on evaluation
+  function autoAssignStickers() {
+    if (!gameImported || !stockfish) return;
+
+    // Analyze each move in the game
+    const analyzedMoves = moveHistory.map((move, index) => {
+      // For demonstration, we'll use simplified analysis
+      // In a real implementation, you'd run Stockfish analysis for each position
+      
+      const beforeFen = index === 0 ? new Chess().fen() : history[index];
+      const afterFen = move.fen;
+      
+      const beforeGame = new Chess(beforeFen);
+      const afterGame = new Chess(afterFen);
+      
+      const materialBefore = countMaterial(beforeGame);
+      const materialAfter = countMaterial(afterGame);
+      const materialChange = getMaterialChange(materialBefore, materialAfter);
+      
+      // Simulate evaluations (in real implementation, use actual Stockfish analysis)
+      const evalBefore = Math.random() * 4 - 2; // Random eval between -2 and 2
+      const evalAfter = Math.random() * 4 - 2;
+      const centipawnLoss = Math.max(0, evalBefore - evalAfter);
+      
+      const gameStateBefore = createGameStateContext(evalBefore, materialBefore);
+      const gameStateAfter = createGameStateContext(evalAfter, materialAfter);
+      
+      // Detect special move types
+      const isBestMove = centipawnLoss < 0.1;
+      const isForced = beforeGame.inCheck() || afterGame.isCheckmate();
+      const isSacrifice = materialChange < -1 && centipawnLoss < 1;
+      
+      const classification = classifyMoveBasedOnAnalysis(
+        centipawnLoss,
+        materialChange,
+        gameStateBefore,
+        gameStateAfter,
+        isBestMove,
+        isForced,
+        isSacrifice
+      );
+      
+      return {
+        ...move,
+        sticker: { square: move.to, type: classification.type }
+      };
+    });
+
+    setMoveHistory(analyzedMoves);
+  }
+
+  // Update stickers when position changes
+  useEffect(() => {
+    if (gameImported) {
+      // Show stickers for moves that have them
+      const stickersToShow: Array<{ square: string; sticker: ChessMoveSticker }> = [];
+      
+      // Show stickers for all moves up to current position
+      for (let i = 0; i < currentPosition && i < moveHistory.length; i++) {
+        const move = moveHistory[i];
+        if (move.sticker) {
+          stickersToShow.push({ square: move.to, sticker: move.sticker });
+        }
+      }
+      
+      setMoveStickers(stickersToShow);
+    }
+  }, [currentPosition, moveHistory, gameImported]);
 
   // Helper function for evaluation bar display
   // Always from White's perspective: positive = White, negative = Black
@@ -909,11 +1526,11 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
         <div className="w-full flex justify-center">
           <div ref={boardContainerRef} className="w-full max-w-[95vw] md:max-w-none flex justify-center items-center">
             {/* Evaluation Bar with label positioned above/below */}
-            <EvaluationBar evaluation={evaluation} boardHeight={boardHeight} flipped={boardFlipped} />
-            <MemoizedChessboard 
+            <EvaluationBar evaluation={evaluation} boardHeight={boardHeight} flipped={boardFlipped} />            <MemoizedChessboard 
               position={fen} 
               width={boardWidth}
               orientation={boardFlipped ? 'black' : 'white'}
+              stickers={moveStickers}
             />
           </div>
         </div>
@@ -980,14 +1597,164 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
               ))}
             </select>
           </div>
-        </div>
-        
-        {/* Move Explanation Panel */}
+        </div>        {/* Sticker Controls - only shown when game is imported */}
+        {gameImported && (
+          <div className="mt-4 flex flex-col items-center gap-2">
+            <div className="text-gray-300 text-sm font-medium">Move Annotations</div>
+            <div className="flex flex-wrap justify-center gap-2">
+              <button
+                onClick={autoAssignStickers}
+                disabled={isAnalyzing}
+                className="px-3 py-1 bg-purple-600 text-white rounded hover:bg-purple-700 transition text-xs disabled:opacity-50"
+              >
+                Quick Annotate
+              </button>
+              <button
+                onClick={autoAssignStickersWithAnalysis}
+                disabled={isAnalyzing}
+                className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition text-xs disabled:opacity-50"
+              >
+                {isAnalyzing ? 'Analyzing...' : 'Deep Analysis'}
+              </button>
+              <button
+                onClick={() => {
+                  setMoveStickers([]);
+                  setMoveHistory(prev => prev.map(move => {
+                    const { sticker, ...rest } = move;
+                    return rest;
+                  }));
+                }}
+                disabled={isAnalyzing}
+                className="px-3 py-1 bg-gray-600 text-white rounded hover:bg-gray-700 transition text-xs disabled:opacity-50"
+              >
+                Clear All
+              </button>
+            </div>
+            
+            {/* Analysis Progress Bar */}
+            {isAnalyzing && (
+              <div className="w-full max-w-xs">
+                <div className="text-xs text-gray-400 text-center mb-1">
+                  Analyzing moves... {Math.round(analysisProgress)}%
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-2">
+                  <div 
+                    className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+                    style={{ width: `${analysisProgress}%` }}
+                  ></div>
+                </div>
+              </div>
+            )}            <div className="flex flex-wrap justify-center gap-1 text-xs">
+              <span className="flex items-center gap-1 text-green-400">
+                <div className="w-4 h-4 bg-green-600 rounded-full flex items-center justify-center text-white">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+                  </svg>
+                </div>
+                Best
+              </span>
+              <span className="flex items-center gap-1 text-green-400">
+                <div className="w-4 h-4 bg-green-600 rounded-full flex items-center justify-center text-white">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M7.5 11L10 13.5l6.5-6.5L18 8.5l-8 8L5.5 12l2-1z"/>
+                  </svg>
+                </div>
+                Excellent
+              </span>
+              <span className="flex items-center gap-1 text-green-300">
+                <div className="w-4 h-4 bg-green-700 rounded-full flex items-center justify-center text-white">
+                  <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                  </svg>
+                </div>
+                Good
+              </span>
+              <span className="flex items-center gap-1 text-cyan-400">
+                <div className="w-4 h-4 bg-cyan-500 rounded-full flex items-center justify-center text-white">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+                  </svg>
+                </div>
+                Brilliant
+              </span>
+              <span className="flex items-center gap-1 text-blue-400">
+                <div className="w-4 h-4 bg-blue-500 rounded-full flex items-center justify-center text-white" style={{fontSize: '10px'}}>!</div>
+                Great
+              </span>
+              <span className="flex items-center gap-1 text-yellow-400">
+                <div className="w-4 h-4 bg-yellow-500 rounded-full flex items-center justify-center text-white" style={{fontSize: '10px'}}>?!</div>
+                Inaccuracy
+              </span>
+              <span className="flex items-center gap-1 text-orange-400">
+                <div className="w-4 h-4 bg-orange-500 rounded-full flex items-center justify-center text-white" style={{fontSize: '10px'}}>?</div>
+                Mistake
+              </span>
+              <span className="flex items-center gap-1 text-red-400">
+                <div className="w-4 h-4 bg-red-500 rounded-full flex items-center justify-center text-white" style={{fontSize: '10px'}}>??</div>
+                Blunder
+              </span>
+              <span className="flex items-center gap-1 text-red-400">
+                <div className="w-4 h-4 bg-red-600 rounded-full flex items-center justify-center text-white">
+                  <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                  </svg>
+                </div>
+                Miss
+              </span>
+              <span className="flex items-center gap-1 text-green-500">
+                <div className="w-4 h-4 bg-green-800 rounded-full flex items-center justify-center text-white">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/>
+                  </svg>
+                </div>
+                Forced
+              </span>
+            </div>
+          </div>
+        )}        {/* Move Explanation Panel */}
         {gameImported && currentPosition > 0 && (
           <div className="mt-4 p-3 bg-gray-800 border border-gray-700 rounded-lg shadow-lg">
-            <div className="flex items-center mb-1">
-              <div className="w-4 h-4 bg-blue-500 rounded-full mr-2"></div>
-              <h3 className="text-gray-200 text-sm font-semibold">Move Explanation</h3>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center">
+                <div className="w-4 h-4 bg-blue-500 rounded-full mr-2"></div>
+                <h3 className="text-gray-200 text-sm font-semibold">
+                  Move {Math.ceil(currentPosition / 2)}.{currentPosition % 2 === 1 ? '' : '..'} {moveHistory[currentPosition - 1]?.san}
+                </h3>
+              </div>
+              {/* Manual annotation dropdown */}
+              <select
+                value={moveHistory[currentPosition - 1]?.sticker?.type || ''}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value) {
+                    assignStickerToCurrentMove(value as ChessMoveSticker['type']);
+                  } else {
+                    // Remove sticker
+                    const moveIndex = currentPosition - 1;
+                    setMoveHistory(prev => {
+                      const updated = [...prev];
+                      if (updated[moveIndex]) {
+                        const { sticker, ...rest } = updated[moveIndex];
+                        updated[moveIndex] = rest;
+                      }
+                      return updated;
+                    });
+                  }
+                }}
+                className="bg-gray-700 text-white text-xs border border-gray-600 rounded px-2 py-1"
+              >
+                <option value="">No annotation</option>
+                <option value="best">⭐ Best</option>
+                <option value="excellent">👍 Excellent</option>
+                <option value="good">✓ Good</option>
+                <option value="brilliant">⭐ Brilliant</option>
+                <option value="great">! Great</option>
+                <option value="inaccuracy">?! Inaccuracy</option>
+                <option value="mistake">? Mistake</option>
+                <option value="blunder">?? Blunder</option>
+                <option value="miss">✗ Miss</option>
+                <option value="forced">→ Forced</option>
+              </select>
             </div>
             <p className="text-gray-300 italic text-sm">
               {currentMoveExplanation || "No explanation available for this move."}
@@ -1054,8 +1821,7 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
                       const whiteMove = moveHistory[idx * 2];
                       const blackMove = moveHistory[idx * 2 + 1];
                       
-                      return (
-                        <tr 
+                      return (                        <tr 
                           key={idx} 
                           ref={(currentPosition === idx * 2 + 1 || currentPosition === idx * 2 + 2) ? currentMoveRef : null}
                           className={`border-b border-gray-600 ${
@@ -1070,7 +1836,14 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
                             }`}
                             onClick={() => goToMove(idx * 2)}
                           >
-                            {whiteMove?.san}
+                            <div className="flex items-center gap-1">
+                              {whiteMove?.san}                              {whiteMove?.sticker && (
+                                <div className="w-4 h-4 rounded-full flex items-center justify-center text-white text-xs" 
+                                     style={{ backgroundColor: getStickerColor(whiteMove.sticker.type) }}>
+                                  {getStickerSymbol(whiteMove.sticker.type)}
+                                </div>
+                              )}
+                            </div>
                           </td>
                           <td 
                             className={`py-2 px-4 cursor-pointer hover:underline ${
@@ -1078,7 +1851,14 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
                             }`}
                             onClick={() => blackMove && goToMove(idx * 2 + 1)}
                           >
-                            {blackMove?.san}
+                            <div className="flex items-center gap-1">
+                              {blackMove?.san}                              {blackMove?.sticker && (
+                                <div className="w-4 h-4 rounded-full flex items-center justify-center text-white text-xs"
+                                     style={{ backgroundColor: getStickerColor(blackMove.sticker.type) }}>
+                                  {getStickerSymbol(blackMove.sticker.type)}
+                                </div>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       );
