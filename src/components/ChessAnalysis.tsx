@@ -1152,22 +1152,25 @@ export default function ChessAnalysis({}: ChessAnalysisProps) {
 
     setMoveHistory(analyzedMoves);
   }
-
   // Update stickers when position changes
   useEffect(() => {
     if (gameImported) {
       // Show stickers for moves that have them
       const stickersToShow: Array<{ square: string; sticker: ChessMoveSticker }> = [];
       
-      // Show stickers for all moves up to current position
-      for (let i = 0; i < currentPosition && i < moveHistory.length; i++) {
-        const move = moveHistory[i];
-        if (move.sticker) {
-          stickersToShow.push({ square: move.to, sticker: move.sticker });
+      // Only show sticker for the current move (if it has one)
+      if (currentPosition > 0 && currentPosition <= moveHistory.length) {
+        const currentMoveIndex = currentPosition - 1;
+        const currentMove = moveHistory[currentMoveIndex];
+        if (currentMove && currentMove.sticker) {
+          stickersToShow.push({ square: currentMove.to, sticker: currentMove.sticker });
         }
       }
       
       setMoveStickers(stickersToShow);
+    } else {
+      // Clear stickers when no game is imported
+      setMoveStickers([]);
     }
   }, [currentPosition, moveHistory, gameImported]);
 
